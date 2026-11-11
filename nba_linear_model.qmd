@@ -1,0 +1,111 @@
+---
+title: "NBA Salary Analysis"
+format: html
+---
+
+Libraries
+
+```{r,message=FALSE }
+library(car)
+library(tidyverse)
+library(glmnet)
+library(lmtest)
+library(sandwich)
+library(corrplot)
+```
+
+Importing data and some basic data wrangling for feature engineering
+
+```{r, message=FALSE}
+
+nba <- vroom::vroom("nba_cleaned.csv")|>
+    separate(Height, into = c("feet", "inches"), sep = "-", convert = TRUE)|>
+    mutate(Weight = as.numeric(str_extract(Weight, "\\d+")),
+        Country = ifelse(Country == "USA", "American", "Foreign"),
+        Height = (feet * 12) + inches)|>
+    select(-Player, -feet, -inches,- PlayerScore, -College, -Position, -Team)
+nba[302, "Weight"] <- 201
+
+```
+
+EDA and Assumptions
+
+```{r}
+head(nba)
+base_lm <- lm((Salary)~Weight + Age + `X3P.` + `X2P.` +
+                 `eFG.` + Rebs + AST + STL + BLK +
+                 Fouls + PTS + Height, data = nba)
+
+avPlots(base_lm,
+        terms = ~ Weight + Age + `X3P.` + `X2P.` +
+                 `eFG.` + Rebs + AST + STL + BLK +
+                 Fouls + PTS + Height)
+
+```
+
+Trying log transform for salary
+
+```{r}
+log_lm <- lm(log(Salary) ~ ., data = nba)
+bptest(log_lm)
+
+```
+
+```{r}
+cor_matrix <- cor(nba[sapply(nba, is.numeric)],
+                  use = "complete.obs")
+
+corrplot(cor_matrix,
+         method = "color",
+         type = "upper",
+         addCoef.col = "black",
+         tl.col = "black",
+         tl.srt = 45)
+```
+
+Lasso- Originally I tried it with all interactions as well but I found that the regular model with no interactions was easier to interpret and not statistically significantly different.
+
+```{r}
+x <- model.matrix((Salary) ~ ., data = nba)[, -1] 
+y <- log(nba$Salary)
+
+# 2. Run Cross-Validation to find the optimal penalty (lambda)
+# alpha = 1 specifies LASSO
+cv_lasso <- cv.glmnet(x, y, alpha = 1)
+best_lambda <- cv_lasso$lambda.min
+
+# 3. Fit the final model
+lasso_model <- glmnet(x, y, alpha = 1, lambda = best_lambda)
+
+# 4. View which interactions the LASSO kept (non-zero coefficients)
+coef_list <- coef(lasso_model, s = "lambda.min")
+coef_list
+```
+
+Reggression with Lasso Selected Coefficients
+
+```{r}
+
+lasso_lm <- lm(
+  log(Salary) ~
+    Age + Rebs + STL + BLK + Fouls + PTS
+,
+  data = nba
+)
+
+summary(lasso_lm)
+```
+
+Testing lasso_lm and comparing to the log model
+
+```{r}
+plot(lasso_lm, which =1)
+bptest(lasso_lm)
+anova(log_lm, lasso_lm)
+```
+
+Heteroscedastic model - adjusting the standard errors based on its hetereoscedasticity.
+
+```{r}
+coeftest(log_lm, vcov = vcovHC(lasso_lm, type = "HC3"))
+```
